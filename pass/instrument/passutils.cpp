@@ -12,9 +12,9 @@ using namespace llvm;
 using namespace std;
 
 std::unordered_set <string> functionsAvoidList = {"__loadCheck", "__GEPCheck", "strlen", "__nestedGEPCheck","sqrt","exit",
-                                             "llvm.dbg.declare","fgets","strstr","strcpy","atol","__isoc99_sscanf","strncmp","strncpy",
+                                             "llvm.dbg.declare","fgets","strstr","atol","__isoc99_sscanf","strncmp",
                                              "fprintf","fopen","fclose","fgetc","__isoc99_fscanf","printf","atoi","fwrite","fread",
-                                             "llvm.memcpy.p0i8.p0i8.i64", "memcpy","strcmp","llvm.memset.p0i8.i64","sprintf","strcat",
+                                             "llvm.memcpy.p0i8.p0i8.i64","strcmp","llvm.memset.p0i8.i64","sprintf","strcat",
                                              "llvm.va_start","llvm.va_end"};
 std::unordered_set <string> globalVarsAvoidList = {"perm"};
 std::unordered_set <string> typesAvoidList = {"syntaxelement","pix_pos","ImageParameters","SGFTree_t","Hash_data","storable_picture"};
@@ -35,20 +35,20 @@ void passutils::replaceFuncionWith(llvm::Function& func, const Twine & replace) 
     custom_function->copyAttributesFrom(&func);
     custom_function->setName(replace);
     Function *NF = custom_function;
-    func.getParent()->getFunctionList().insert(func.getIterator(), NF);
+    func.getParent()->getFunctionList().insert(func.getIterator(), NF); //在模块中插入替换函数
 
     int counter = 0;
-    while (!func.use_empty()) {
-        counter++;
-        CallSite CS(func.user_back());
+    while (!func.use_empty()) {     //循环查找原函数的所有调用指令
+        counter++;  
+        CallSite CS(func.user_back());  
         std::vector<Value *> args(CS.arg_begin(), CS.arg_end());
         Instruction *call = CS.getInstruction();
-        Instruction *New = CallInst::Create(NF, args, "", call);
+        Instruction *New = CallInst::Create(NF, args, "", call);    //创建新的调用指令，调用函数变为替换函数
 
-        if (!call->use_empty())
-            call->replaceAllUsesWith(New);
+        if (!call->use_empty())     //这里不懂，调用函数的user是什么
+            call->replaceAllUsesWith(New);  //进行替换
 
-        call->getParent()->getInstList().erase(call);
+        call->getParent()->getInstList().erase(call);   //basicblock中去掉原来的调用指令，这步是退出循环的变化条件
     }
     errs() << counter  << " " << func.getName() <<" functions were replaced " << "\n";
 }
@@ -145,21 +145,57 @@ void passutils::instrumentStore(llvm::StoreInst* SI){
 
 
     // To find all the pointers in the current stack frame
-    if (AllocaInst *AI = dyn_cast<AllocaInst>(SI->getOperand(1))){
-        if(SI->getOperand(0)->getType()->isPointerTy() && str.find("_IO_FILE")==std::string::npos){
-            pointerProperties pointer;
-            pointer.Numuse = AI->getNumUses();
-            pointer.Operand0 = SI->getOperand(0);
-            pointer.Operand1 = SI->getOperand(1);
-            pointer.isPassedToFunctionBefore = false;
-            pointer.isCheckedBefore = false;
-            //pointer.printProperties();
+    if (AllocaInst *AI = dyn_cast<AllocaInst>(SI->getOperand(1))){  //SI的第二个参数是allocInst类型就说明从数组或者结构开头开始写入
+        if(CallInst *CI = dyn_cast<CallInst>(SI->getOperand(0)->stripPointerCasts())){
+            string callfuncname = CI->getCalledFunction()->getName(); 
+            if((callfuncname.find("malloc") != std::string::npos || callfuncname.find("realloc") != std::string::npos || callfuncname.find("calloc") != std::string::npos) && str.find("_IO_FILE")==std::string::npos){
+                int isIP = 0;
+                for (auto &ptr : pointers){
+                    if(ptr.Operand1 == AI){
+                        ptr.Numuse = AI->getNumUses();
+                        ptr.Operand0 = SI->getOperand(0);
+                        ptr.isPassedToFunctionBefore = false;
+                        ptr.isCheckedBefore = false;
+                        isIP = 1;
 
-            pointers.push_back(pointer);
+                        break;
+                    }
+                }
+
+                if(!(isIP)){
+                    pointerProperties pointer;
+                    pointer.Numuse = AI->getNumUses();
+                    pointer.Operand0 = SI->getOperand(0);
+                    pointer.Operand1 = SI->getOperand(1);
+                    pointer.isPassedToFunctionBefore = false;
+                    pointer.isCheckedBefore = false;
+                    //pointer.printProperties();
+
+                    pointers.push_back(pointer);
+                }
+            }
+        }
+        if(LoadInst *LI = dyn_cast<LoadInst>(SI->getOperand(0)->stripPointerCasts())){
+            if(AllocaInst *AI2 = dyn_cast<AllocaInst>(LI->getOperand(0))){
+                if(AI->getType() == AI2->getType()){
+                    for (auto &ptr : pointers){
+                        if(ptr.Operand1 == AI2){
+                            pointerProperties pointer;
+                            pointer.Numuse = ptr.Numuse;
+                            pointer.Operand0 = ptr.Operand0;
+                            pointer.Operand1 = AI;
+                            pointer.isPassedToFunctionBefore = ptr.isPassedToFunctionBefore;
+                            pointer.isCheckedBefore = ptr.isCheckedBefore;
+
+                            pointers.push_back(pointer);
+                        }
+                    }                    
+                }
+            }
         }
     }
 
-    // Checks moved to passutils::instrumentLoad
+    // Checks moved to passutils::instrumentLoad 为什么Store不需要check了
     return;
 
     if(isa<GlobalVariable>(SI->getOperand(0))){
@@ -225,7 +261,62 @@ void passutils::instrumentCalls(llvm::CallInst* CI) {
         // free function is called here
         // since it is hard to track all the pointers and their aliases, we assume we need to disable
         // optimization from this pointer forward
-        FlagFreeCalled = 1 ;
+        int numParams = CI->getNumArgOperands();
+        for (int i = 0; i <numParams ; ++i) {
+            string str = passutils::getString(CI->getOperand(i)->getType());
+            
+            if (CI->getOperand(i)->getType()->isPointerTy() && str.find("_IO_FILE")==std::string::npos) {
+                if (LoadInst *LI = dyn_cast<LoadInst>(CI->getOperand(i)->stripPointerCasts())) {
+                    if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
+                        Value *operand_0;
+                        for (auto &ptr : pointers) {
+                            if (ptr.Operand1 == AI) {
+                                operand_0 = ptr.Operand0;
+                            }
+                        }
+                        for (auto &ptr : pointers) {
+                            if (ptr.Operand0 == operand_0) {
+                                ptr.isPassedToFunctionBefore = true;
+                                ptr.isCheckedBefore = false;
+                            }
+                        }                                                
+                    }
+                }
+            }
+        }        
+        return;
+    }
+
+    if(CI->getCalledFunction() && CI->getCalledFunction()->getName() == "__ptauth_realloc"){
+        for(auto arg_size = CI->arg_begin(); arg_size != CI->arg_end(); ++arg_size){
+            if(auto val = dyn_cast<ConstantInt>(arg_size))
+                if(val->getZExtValue() == 0){
+                    int numParams = CI->getNumArgOperands();
+                    for (int i = 0; i <numParams ; ++i) {
+                        string str = passutils::getString(CI->getOperand(i)->getType());
+                        
+                        if (CI->getOperand(i)->getType()->isPointerTy() && str.find("_IO_FILE")==std::string::npos) {
+                            if (LoadInst *LI = dyn_cast<LoadInst>(CI->getOperand(i)->stripPointerCasts())) {
+                                if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
+                                    Value *operand_0;
+                                    for (auto &ptr : pointers) {
+                                        if (ptr.Operand1 == AI) {
+                                            operand_0 = ptr.Operand0;
+                                        }
+                                    }
+                                    for (auto &ptr : pointers) {
+                                        if (ptr.Operand0 == operand_0) {
+                                            ptr.isPassedToFunctionBefore = true;
+                                            ptr.isCheckedBefore = false;
+                                        }
+                                    }                         
+                                }
+                            }
+                        }
+                    }        
+                return;
+            }
+        }
     }
 
     if (CI->getCalledFunction() && (CI->getCalledFunction()->isDeclaration()) &&
@@ -286,7 +377,7 @@ void passutils::instrumentCalls(llvm::CallInst* CI) {
                     else {
                         xpacedPointer = IRB2.CreateCall(__xpac, {IRB2.CreateBitCast(CI->getOperand(i),VoidPtrTy)});
                     }
-
+                    //这两个有区别吗
                     if(CI->getOperand(i)->getType() != VoidPtrTy){
                         Value *bitCast = IRB2.CreateBitCast(xpacedPointer, CI->getOperand(i)->getType());
                         CI->setOperand(i, bitCast);
@@ -295,6 +386,7 @@ void passutils::instrumentCalls(llvm::CallInst* CI) {
                     else
                         CI->setOperand(i, xpacedPointer);
                 }
+                
 #endif
 
             } // End of pointer detection in parameters
@@ -312,59 +404,63 @@ void passutils::instrumentCalls(llvm::CallInst* CI) {
                 InternalCall = 1;
                 GEPS.clear();
                 if (LoadInst *LI = dyn_cast<LoadInst>(CI->getOperand(i)->stripPointerCasts())) {
-                    if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
+                    if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) { //调用函数时读了指针指向的值，但是这里为什么要单独列出来，按理来说不是之前已经有过load指令了吗
 
                         int isChecked = 0;
+                        int isAllocaed = 0;
                         for (auto &ptr : pointers) {
                             if (ptr.Operand1 == AI) {
+                                isAllocaed = 1;
                                 if (ptr.isCheckedBefore) {
-                                    isChecked = 1;
-                                    break;
+                                    isChecked = 1;  //前面已经check过就不用check了
                                 }
+                                break;
                             }
                         }
 
-                        if (!isChecked) {
-                            IRBuilder<> IRB2(LI);
-                            Value * V = IRB2.CreateBitCast(LI->getOperand(0), VoidPtrTy);
+                        if (!isChecked && isAllocaed) {
+                            IRBuilder<> IRB2(CI);
+                            Value * V = IRB2.CreateBitCast(LI, VoidPtrTy);
                             V = IRB2.CreateCall(__loadCheck, {V});
-                            Value * ii = IRB2.CreateBitCast(V, LI->getOperand(0)->getType());
-                            LI->setOperand(0, ii);
-
+                            
+                            Value *operand_0;
                             for (auto &ptr : pointers) {
                                 if (ptr.Operand1 == AI) {
+                                    operand_0 = ptr.Operand0;
+                                    break;
+                                }
+                            }
+                            for (auto &ptr : pointers) {
+                                if (ptr.Operand0 == operand_0) {
                                     ptr.isPassedToFunctionBefore = true;
                                     ptr.isCheckedBefore = false;
-                                    break;
                                 }
                             }
                        }
                     }
                 }
 
-                if (BitCastInst *BI = dyn_cast<BitCastInst>(CI->getOperand(i))) {
+                // if (BitCastInst *BI = dyn_cast<BitCastInst>(CI->getOperand(i))) {
 
-                    if (LoadInst *LI = dyn_cast<LoadInst>(BI->getOperand(0))) {
+                //     if (LoadInst *LI = dyn_cast<LoadInst>(BI->getOperand(0))) {
 
-                        if (LI = dyn_cast<LoadInst>(LI->getOperand(0))) {
+                //         if (LI = dyn_cast<LoadInst>(LI->getOperand(0))) {      //类型转换之后的指针指向元素，为什么这里不用判断是否之前check过()
 
-                            if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
-                                IRBuilder<> IRB2(LI);
-                                Value * V = IRB2.CreateBitCast(LI->getOperand(0), VoidPtrTy);
-                                V = IRB2.CreateCall(__loadCheck, {V});
-                                Value * ii = IRB2.CreateBitCast(V, LI->getOperand(0)->getType());
-                                LI->setOperand(0, ii);
+                //             if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
+                //                 IRBuilder<> IRB2(CI);
+                //                 Value * V = IRB2.CreateBitCast(LI, VoidPtrTy);
+                //                 V = IRB2.CreateCall(__loadCheck, {V});
 
-                                for (auto &ptr : pointers) {
-                                    if (ptr.Operand1 == AI) {
-                                        ptr.isPassedToFunctionBefore = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    } // end load
-                }
+                //                 for (auto &ptr : pointers) {
+                //                     if (ptr.Operand1 == AI) {
+                //                         ptr.isPassedToFunctionBefore = true;
+                //                         break;
+                //                     }
+                //                 }
+                //             }
+                //         }
+                //     } // end load
+                // }
 
                 else {
                     //errs() << "CI->getOperand(i) is not loading AllocaInst " << *CI->getOperand(i) << "\n";
@@ -372,13 +468,12 @@ void passutils::instrumentCalls(llvm::CallInst* CI) {
 
             }
         }
-    }
-
+    }    
 }
 
 void passutils::instrumentAlloc(llvm::AllocaInst *AI) {
-    isPrevAlloca = true;
-    prevAI = AI;
+    isPrevAlloca = true;    //进行了alloca操作？
+    prevAI = AI;    //alloca指令
 
     if(AI->getAllocatedType()->isPointerTy()) {
 
@@ -393,13 +488,13 @@ void passutils::instrumentAlloc(llvm::AllocaInst *AI) {
 }
 
 void passutils::instrumentReturn(llvm::ReturnInst *RI) {
-    isPrevAlloca = false;
+    isPrevAlloca = false;      //函数返回需要释放空间
 
     GlobalObjectsArrSize=0;
     GlobalObjectsArr[100]={0};
 
     FlagFreeCalled = 0;
-    pointers.clear();
+    pointers.clear();   //函数返回都置为0
 
 }
 
@@ -475,19 +570,22 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
     string str = passutils::getString(LI->getOperand(0)->getType());
 
         if(LI->getType()->isPointerTy() && str.find("_IO_FILE")==std::string::npos) {
-
+            //这个传进来的LI类型不就是指针
             str = passutils::getString(LI->getOperand(0)->getType());
             string structType="";
             if (str.find("struct")!= std::string::npos){
 
-                structType = str.substr(str.find(".") + 1, str.find("*")-str.find(".")-1);
+                structType = str.substr(str.find(".") + 1, str.find("*")-str.find(".")-1);  //*是什么
                 //errs() << "LI->getOperand(0)->getType() = " << *LI->getOperand(0)->getType() << "\n";
                 //errs() << "structType is = " << structType << "\n";
             }
 
+
             if (globalVarsAvoidList.count(LI->getOperand(0)->getName()) == 0 && typesAvoidList.count(structType) == 0) {
                 if (LoadInst *LI2 = dyn_cast<LoadInst>(LI->getOperand(0))) {
                     if (AllocaInst *AI = dyn_cast<AllocaInst>(LI2->getOperand(0))) {
+                        Value *operand_0;
+                        int isPToHeap = 0;
                         for (auto &ptr : pointers) {
                             if (ptr.Operand1 == AI) {
 
@@ -496,7 +594,9 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
                                     Value * V = IRB2.CreateBitCast(LI->getOperand(0), VoidPtrTy);
                                     V = IRB2.CreateCall(__loadCheck, {V});
                                     Value * ii = IRB2.CreateBitCast(V, LI->getOperand(0)->getType());
-                                    LI->setOperand(0, ii);
+                                    LI->setOperand(0, ii);  //为什么有这么一步操作
+                                    operand_0 = ptr.Operand0;
+                                    isPToHeap = 1;
                                 } else {
                                     IRBuilder<> IRB2(LI);
                                     Value * xpacedPointer = IRB2.CreateCall(__noCheck,{IRB2.CreateBitCast(LI->getOperand(0),VoidPtrTy)});
@@ -504,16 +604,38 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
                                     LI->setOperand(0, ii);
                                 }
                             }
-
                         }
-
+                        if(isPToHeap){
+                        for (auto &ptr : pointers) {
+                            if (ptr.Operand0 == operand_0) {
+                                ptr.isPassedToFunctionBefore = false;
+                                ptr.isCheckedBefore = true;
+                                }
+                            }
+                        }
+                    }
+                    if (isa<GlobalVariable>(LI2->getOperand(0))) {
+                        IRBuilder<> IRB2(LI);
+                        Value * V = IRB2.CreateBitCast(LI->getOperand(0), VoidPtrTy);
+                        V = IRB2.CreateCall(__loadCheck, {V});
+                        Value * ii = IRB2.CreateBitCast(V, LI->getOperand(0)->getType());
+                        LI->setOperand(0, ii);
                     }
                 }
 
                 if (LI->hasNUsesOrMore(1)){
+                    if (dyn_cast<GetElementPtrInst>(LI->user_back()) && isa<GlobalVariable>(LI->getOperand(0))){
+                        GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(LI->user_back());
+                        
+                        IRBuilder<> IRB2(GEP);
+                        Value *V = GEP->getOperand(0);
+                        V = IRB2.CreateBitCast(V, VoidPtrTy);
+                        V = IRB2.CreateCall(__GEPCheck, {V});
+                        Value *ii = IRB2.CreateBitCast(V, GEP->getOperand(0)->getType());
+                        GEP->setOperand(0, ii);                        
+                    }
 
                     if (dyn_cast<GetElementPtrInst>(LI->user_back()) && !isa<GlobalVariable>(LI->getOperand(0))){
-
                         if (Constant *Co = dyn_cast<Constant>(LI->getOperand(0))) {
                            // errs() << "LI is a constant" << *LI->getOperand(0) << "\n";
                         }
@@ -522,12 +644,14 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
 
                         if (AllocaInst *AI = dyn_cast<AllocaInst>(LI->getOperand(0))) {
                             //errs() << "Gep from a Load and Alloc " << *AI << "\n";
+                            Value *operand_0;
+                            int isPToHeap = 0;
 
                             for (auto &ptr : pointers) {
 
                                 if (ptr.Operand1 == AI) {
 
-                                    if (ptr.isPassedToFunctionBefore == true) {
+                                    if (ptr.isPassedToFunctionBefore == true) { //不懂这个判断其实就是被free
 
                                         IRBuilder<> IRB2(GEP);
                                         Value *V = GEP->getOperand(0);
@@ -535,43 +659,27 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
                                         V = IRB2.CreateCall(__GEPCheck, {V});
                                         Value *ii = IRB2.CreateBitCast(V, GEP->getOperand(0)->getType());
                                         GEP->setOperand(0, ii);
-                                        ptr.isPassedToFunctionBefore = false;
-                                        if (ptr.isCheckedBefore == true ){
-                                            //errs() << This pointer has already been checked\n";
-                                        }
-                                        ptr.isCheckedBefore = true;
+
+                                        isPToHeap = 1;
+                                        operand_0 = ptr.Operand0;
                                         break;
                                     } else {
                                         // no check
                                     }
                                 }
-
-                                else {
-                                      // TODO
-                                      // Basic Alias Analysis based on type
-                                      if (ptr.Operand1->getType() == AI->getType()){
-                                          if (ptr.isPassedToFunctionBefore) {
-                                              if (ptr.isCheckedBefore == false ){
-//                                                  //errs() << "Basic Alias Analysis based on type"<< "\n";
-//                                                  IRBuilder<> IRB2(GEP);
-//                                                  Value *V = GEP->getOperand(0);
-//                                                  V = IRB2.CreateBitCast(V, VoidPtrTy);
-//                                                  V = IRB2.CreateCall(__GEPCheck, {V});
-//                                                  Value *ii = IRB2.CreateBitCast(V, GEP->getOperand(0)->getType());
-//                                                  GEP->setOperand(0, ii);
-                                              }
-                                          }
-                                      }
-                                }
-
-
-
                             }
-
+                            if(isPToHeap){
+                                for (auto &ptr : pointers){
+                                    if (ptr.Operand0 == operand_0){
+                                        ptr.isPassedToFunctionBefore = false;
+                                        ptr.isCheckedBefore = true;
+                                    }
+                                }
+                            }
                         }
 
                         if (GetElementPtrInst *GI2 = dyn_cast<GetElementPtrInst>(LI->getOperand(0))) {
-
+                            //
                             int oneNestedInstrument = 0;
                             if (CallInst *CI = dyn_cast<CallInst>(GI2->getOperand(0)->stripPointerCasts())) {
                                 if (CI->getCalledFunction() && CI->getCalledFunction()->getName()=="__nestedGEPCheck"){
@@ -582,17 +690,6 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
 
                             if (globalVarsAvoidList.count(GI2->getOperand(0)->getName()) == 0 && !oneNestedInstrument) {
 
-                                int instrumentGEP = 1;
-                                if (isa<GlobalVariable>(GI2->getOperand(0))) {
-                                    //errs() << "GEP from global var = " << GI2->getOperand(0)->getName() << "\n";
-
-                                    if (globalVarsAvoidList.count(GI2->getOperand(0)->getName())>0) {
-                                        instrumentGEP = 0;
-                                    }
-
-                                }
-
-                                if (GEPS.empty()) {
                                     IRBuilder<> IRB2(GEP);
                                     Value * V = GEP->getOperand(0);
                                     V = IRB2.CreateBitCast(V, VoidPtrTy);
@@ -600,27 +697,6 @@ void passutils::instrumentLoad(llvm::LoadInst *LI) {
                                     Value * ii = IRB2.CreateBitCast(V, GEP->getOperand(0)->getType());
                                     GEP->setOperand(0, ii);
 
-                                    GEPProperties gep;
-                                    gep.type = GI2->getPointerOperandType();
-                                    gep.isCheckedBefore = true;
-                                    GEPS.push_back(gep);
-                                }
-                                else {
-                                    int sameType = 0;
-                                    for (auto &g : GEPS) {
-                                        if (g.type == GI2->getPointerOperandType()) {
-                                            sameType = 1;
-                                        }
-                                    }
-
-                                    if (!sameType) {
-
-                                        GEPProperties gep;
-                                        gep.type = GI2->getPointerOperandType();
-                                        gep.isCheckedBefore = true;
-                                        GEPS.push_back(gep);
-                                    }
-                                }
                             } // end of avoid global vars
 
                         }
@@ -651,6 +727,16 @@ void passutils::optimizer(llvm::Function& F) {
                     FlagFreeCalled = 1 ;
                 }
 
+                if(CI->getCalledFunction() && CI->getCalledFunction()->getName() == "__ptauth_realloc"){
+                    for(auto arg_size = CI->arg_begin(); arg_size != CI->arg_end(); ++arg_size){
+                        if(auto val = dyn_cast<ConstantInt>(arg_size))
+                            if(val->getZExtValue() == 0){
+                                FlagFreeCalled = 1;
+                                break;
+                        }
+                    }
+                }
+
                 if( CI->getCalledFunction() && functionsAvoidList.count(CI->getCalledFunction()->getName())==0){
                     int numParams = CI->getNumArgOperands();
                     int flagPointer=0;
@@ -676,8 +762,8 @@ void passutils::optimizer(llvm::Function& F) {
                 }
 
                 if (LI->hasNUsesOrMore(1)){
-                    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(LI->user_back())){
-                        if (GetElementPtrInst *GI2 = dyn_cast<GetElementPtrInst>(LI->getOperand(0))) {
+                    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(LI->user_back())){ //Load的最后一个User是GetElementPtrInst指令即访问数组或者结构的元素
+                        if (GetElementPtrInst *GI2 = dyn_cast<GetElementPtrInst>(LI->getOperand(0))) {  //Load指令所load的参数也是GetElementPtrInst即load是从数组或者结构中获取元素
                             NestedPointer = 1;
                         }
                     }

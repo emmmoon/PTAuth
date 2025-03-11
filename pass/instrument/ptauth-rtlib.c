@@ -82,9 +82,9 @@ void* backward_search(void* ptr, struct Metadata* meta, char type){
     unsigned long threshold  = LONG_MAX;
 
     if (BKTHREASHOLDENABLED){
-        threshold = 1024;
+        threshold = 688;
     }
-
+    printf("Begin backward_search.\n");
     for(int i=1;i<threshold;i=i+1){
         if (((long)xpacedPtr-i)%16!=0){ //  optimization
             i +=  (((long)xpacedPtr-i)%16)-1;
@@ -110,6 +110,7 @@ void* backward_search(void* ptr, struct Metadata* meta, char type){
                     DEBUG_PRT("ID is validated by PACIA in Backward Search for nothing!\n");
                     DEBUG_PRT("p is = %p\n",p);
             }
+            printf("backward_search succeeds.\n");
             return xpacedPtr;
         }
     }
@@ -119,7 +120,9 @@ void* backward_search(void* ptr, struct Metadata* meta, char type){
     else {
         abort();
     }
-
+    printf("backward_search fails.\n");
+    printf("use after free has been detected,the program will crash.\n");
+    exit(0);
     return ptr;
 }
 
@@ -154,7 +157,9 @@ void initMD(struct Metadata* meta, int size){
     return;
 #endif
     unsigned long num;
-    srand(time(0));
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    srand(ts.tv_nsec ^ ts.tv_sec);
     num = rand();
     num = (num << 32) | rand();
     num = (num % (999999999 - 100000000)) + 100000000;
@@ -181,9 +186,11 @@ void* __ptauth_malloc(size_t size) {
     uint64_t alloc_size = size + 8;
     struct Metadata* meta = malloc(alloc_size);
     DEBUG_PRT("meta location is = %p \n",meta );
+    printf("pa_malloc:the malloc meta location is = %p \n",meta);
     initMD(meta,size);
-    DEBUG_PRT("id After initMD  is = %d\n", meta->id);
+    DEBUG_PRT("id After initMD  is = %lx\n", meta->id);
     unsigned long id = meta->id;
+    printf("pa_malloc:the malloc id is %lx.\n",id);
     void* retPtr = (void*)((int*)meta+2);
     DEBUG_PRT("object pointer location is  = %p\n", retPtr);
 
@@ -200,6 +207,7 @@ void* __ptauth_malloc(size_t size) {
 	);
 #else
     retPtr =__pacia(retPtr,id);
+    printf("pa_malloc:the malloc object pointer location is = %p \n",retPtr);
 
 #endif
     return retPtr;
@@ -246,7 +254,7 @@ void* __ptauth_calloc(size_t item, size_t sizeBlock) {
 #if INLINEFUNCTIONS
 __attribute__((always_inline)) void __ptauth_free(void* ptr) {
 #else
-void __ptauth_free(void* ptr) {
+void __ptauth_free(void* ptr) { 
 #endif
 
 #if RETURN
@@ -258,10 +266,13 @@ void __ptauth_free(void* ptr) {
 
     struct Metadata* meta = (void*)((int*)ptr-2);
     DEBUG_PRT("__ptauth_free:meta ptr is = %p\n",meta );
+    printf("__pa_free:meta ptr is = %p\n",meta);
 
 	meta = ((void *)((unsigned long long)meta & ~MASKHIGHBIT));
     DEBUG_PRT("__ptauth_free:meta ptr after stripping is = %p\n",meta );
+    printf("__pa_free:meta ptr after stripping is = %p\n",meta );
     unsigned long id = meta->id;
+    printf("__pa_free:meta id after stripping is = %lx\n",id );
     #if PACENABLED
     asm (
 	"mov %x0,%0\n"
@@ -276,18 +287,15 @@ void __ptauth_free(void* ptr) {
     #else
     ptr = __autia(ptr,id, 'F');
     #endif
-
-    DEBUG_PRT("check the free pointer \n");
-    unsigned long long ptrViolation= (unsigned long long)ptr & ~MASKLOWBIT;
-    DEBUG_PRT("ptrViolation after unPACing is = %p \n",ptrViolation );
-    //
-    if (ptrViolation)
+    if (!ptr)
     {
         printf("Pointer is 0x20000000000000 !\n");
-        printf("\t****** __ptauth_free! Pointer is not Valid! ****** \n");
+        printf("\t****** __pa_free! Pointer is not Valid! ****** \n");
         exit(0);
     }
 
+    DEBUG_PRT("check the free pointer \n");
+    //
 	meta->id = 2;
     free((int*)ptr-2);
 #endif
@@ -303,26 +311,36 @@ void* __ptauth_realloc(void *ptr, size_t size) {
         exit(1);
     }
 	DEBUG_PRT("\n\n\n\t---Custom Realloc ...!\n");
+    if(size == 0){
+        struct Metadata* meta = (void*)((int*)ptr-2);
+        meta = ((void *)((unsigned long long)meta & ~MASKHIGHBIT));
+        unsigned long id = meta->id;
+        ptr = __autia(ptr,id, 'F');
+        if (!ptr)
+        {
+            printf("Pointer is 0x20000000000000 !\n");
+            printf("\t****** __pa_realloc! Pointer is not Valid! ****** \n");
+            exit(0);
+        }
+        meta->id = 2;
+        realloc((int*)ptr-2, 0);        
+        return NULL;
+    }
+    else{
 	void* placeholderptr = ptr;
-
-	// workaround for Calloc()
-//    DEBUG_PRT("check the free pointer \n");
-//    unsigned long long ptrSignature= (unsigned long long)ptr & ~MASKLOWBIT;
-//    DEBUG_PRT("ptrViolation after unPACing is = %p \n",ptrSignature );
-//    if(!ptrSignature){
-//        return realloc(__xpac(ptr), size);
-//    }
 
     ptr = ((void *)((unsigned long long)ptr & ~MASKHIGHBIT));
 
     DEBUG_PRT("__ptauth_realloc: ptr after strip is %p\n", ptr);
-    void* tmpptr=realloc(ptr-8, size);
+    void* tmpptr=realloc(ptr - 8, size + 8);
     DEBUG_PRT("__ptauth_realloc: ptr after realloc() %p\n", tmpptr);
 
-    if (ptr-8!=tmpptr){
-        DEBUG_PRT("__ptauth_realloc: ptr are not equals! = %p\n", tmpptr);
+    DEBUG_PRT("__ptauth_realloc: ptr are not equals! = %p\n", tmpptr);
 
-        struct Metadata* meta = tmpptr;
+    if(tmpptr != NULL){
+        struct Metadata* meta = (void*)((int*)placeholderptr-2);
+        meta->id = 2;
+        meta = tmpptr;
         initMD(meta,size);
         unsigned long id = meta->id;
         void* retPtr = (void*)((int*)meta+2);
@@ -341,21 +359,19 @@ void* __ptauth_realloc(void *ptr, size_t size) {
 	);
 #else
         retPtr =__pacia(retPtr,id);
-        //meta->id_signature= __pacga(id, (long)meta);
+    //meta->id_signature= __pacga(id, (long)meta);
 #endif
-        DEBUG_PRT("__ptauth_realloc: ptr after realloc and pacia is  = %p\n", retPtr);
+    DEBUG_PRT("__ptauth_realloc: ptr after realloc and pacia is  = %p\n", retPtr);
 
-       // abort();
+    // abort();
         return retPtr;
     }
-
-    else {
-        return placeholderptr;
-    }
-
+    else
+        return NULL;
 
     // Should be implemented!
 	//return ptr;
+    }
 }
 
 #if INLINEFUNCTIONS
@@ -404,9 +420,10 @@ __attribute__((always_inline)) void* __GEPCheck(void *ptr){
 #if RETURN
     return ptr;
 #endif
-
+    printf("The gepcheck ptr is %p.\n", ptr);
     //printf("Pointer in ---GEPCheck is = ! %p\n",ptr);
     unsigned long long signature= (unsigned long long)ptr & ~MASKLOWBIT;
+    printf("The gepCheck signature is %llx.\n",signature);
     if(signature){
 //        _Z10backtrace1v();
         void* q= validatePointer(ptr, 'L');
@@ -428,9 +445,10 @@ __attribute__((always_inline)) void* __nestedGEPCheck(void *ptr){
 #if RETURN
     return ptr;
 #endif
-
+    printf("The nestedcheck ptr is %p.\n", ptr);
     //printf("Pointer in ---__nestedGEPCheck is = ! %p\n",ptr);
     unsigned long long signature= (unsigned long long)ptr & ~MASKLOWBIT;
+    printf("The nestedCheck signature is %llx.\n",signature);
     if(signature){
         void* q= validatePointer(ptr, 'L');
 #if TOPBYTEIGNORE
@@ -450,8 +468,10 @@ void* __loadCheck(void *ptr) {
 #if RETURN
     return ptr;
 #endif
+    printf("The loadcheck ptr is %p.\n", ptr);
     //printf("Pointer in ---LoadCheck is = ! %p\n",ptr);
     unsigned long long signature= (unsigned long long)ptr & ~MASKLOWBIT;
+    printf("The loadCheck signature is %llx.\n",signature);
 
     if(signature){
         void* q= validatePointer(ptr, 'L');

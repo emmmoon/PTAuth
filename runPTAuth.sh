@@ -5,11 +5,11 @@ PIUSER=ubuntu
 PTAUTHPATH=/home/ubuntu/ptauth
 
 #			******************************** Toy examples  ******************************** 
-docker run -u=$UID:$(id -g $USER) --rm -it -v  $PWD/pass:/pass rezamirz/ptauth_image /bin/bash -c "cd pass;./runtoyexample.sh"
+#docker run -u=$UID:$(id -g $USER) --rm -it -v  $PWD/pass:/pass rezamirz/ptauth_image /bin/bash -c "cd pass;./runtoyexample.sh"
 # scp pass/stest.arm.elf $PIUSER@$PIIP:$PTAUTHPATH/  #scp to Pi4
 
 #			******************************** SPEC 2006  ******************************** 
-# docker run -u=$UID:$(id -g $USER) --rm -it -v  $PWD/pass:/pass rezamirz/ptauth_image /bin/bash -c "cd pass;./470.lbm.sh"
+docker run -u=$UID:$(id -g $USER) --rm -it -v  $PWD/pass:/pass rezamirz/ptauth_image /bin/bash -c "cd pass;./470.lbm.sh"
 # scp pass/stest.arm.elf $PIUSER@$PIIP:$PTAUTHPATH/470.lbm  # scp to Pi4
 
 # docker run -u=$UID:$(id -g $USER) --rm -it -v  $PWD/pass:/pass rezamirz/ptauth_image /bin/bash -c "cd pass;./429.mcf.sh"

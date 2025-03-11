@@ -14,7 +14,7 @@ clang  -c -emit-llvm --target=aarch64-linux-gnu -march=armv8.3-a  pacinst.c -fno
 llc -O3 -filetype=obj ptauth-rtlib.bc
 
 cd ../Test
-clang -g -c -emit-llvm --target=aarch64-linux-gnu -march=armv8.3-a toyexample.c -fno-stack-protector -O0
+clang -g -c -emit-llvm --target=aarch64-linux-gnu -march=armv8.3-a toyexample.c -fno-stack-protector  -O0 
 cd ../
 
 opt -load instrument/libPTAuthpass.so -ptauth < Test/toyexample.bc > instrumented.bc
@@ -32,4 +32,4 @@ llvm-dis extfunc_optimized.bc
 ### Creating ELF file from the object
 # UBSAN version for debugging
 #clang -mllvm -inline-threshold=100000 --target=aarch64-linux-gnu -fsanitize=undefined  -fno-omit-frame-pointer -march=armv8.3-a extfunc_optimized.bc -o stest.arm.elf -lm  -fno-stack-protector  -O3  -g
-clang -mllvm -inline-threshold=100000 --target=aarch64-linux-gnu -march=armv8.3-a extfunc_optimized.bc -o stest.arm.elf -lm  -fno-stack-protector  -O3  -g          
+clang -mllvm -inline-threshold=100000 --target=aarch64-linux-gnu -march=armv8.3-a extfunc_optimized.bc -o stest.arm.elf -lm  -fno-stack-protector -O3  -g          
