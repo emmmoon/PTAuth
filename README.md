@@ -19,17 +19,3 @@ $ cd PTAuth
 $ ./runPTAuth.sh
 ```
 As PTAuth requires the whole LLVM bitcode of a project, we developed a few bash scripts to automate the process of extracting and instrumenting the bitcode using the Docker image of PTAuth. By default, the `runPTAuth.sh` script extracts the bitcode of the the [toyexample.c](pass/Test/toyexample.c) and instruments it. The final output is an instrumented binary which is called `stest.arm.elf` in the [pass](pass/) folder. This binary is executable on a system that supports ARMv8 instruction sets. Other sample bash scripts for automating the extraction/instrumentation of apps are also included. You can also use [wllvm](https://github.com/travitch/whole-program-llvm) to extract the whole bitcode of an application.
-
-
-# Citation
-
-If your research finds one or several components of PTAuth useful, please cite our paper:
-
-```
-@inproceedings{farkhani2021ptauth,
-  title={PTAuth: Temporal Memory Safety via Robust Points-to Authentication},
-  author={Farkhani, Reza Mirzazade and Ahmadi, Mansour and Lu, Long},
-  booktitle={30th $\{$USENIX$\}$ Security Symposium ($\{$USENIX$\}$ Security 21)},
-  year={2021}
-}
-```
